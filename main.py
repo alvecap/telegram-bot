@@ -1,4 +1,3 @@
-# main.py
 from flask import Flask
 import os
 import requests
@@ -13,7 +12,6 @@ import threading
 
 app = Flask(__name__)
 
-# Configuration du logger
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -84,6 +82,20 @@ class TelegramNotifier:
     def __init__(self, config: Config):
         self.config = config
         self.bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+
+    def send_startup_message(self):
+        try:
+            message = (
+                "🚀 *BOT DÉMARRÉ* 🚀\n\n"
+                "Le bot est maintenant actif et va générer son premier combo..."
+            )
+            self.bot.send_message(
+                chat_id=self.config.TELEGRAM_CHAT_ID,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Erreur envoi message démarrage: {e}")
 
     def send_combo_predictions(self, predictions: List[Prediction], total_odds: float, stats: Stats):
         try:
@@ -274,15 +286,12 @@ class BettingBot:
         now = datetime.now(self.config.TIMEZONE)
         first_match_time = min(p.start_time for p in self.current_predictions)
         
-        # Vérifier 2h après le premier match
         if now < first_match_time + timedelta(hours=2):
             return
 
-        # Simuler vérification des résultats
         all_won = True
         for prediction in self.current_predictions:
-            # Dans une version réelle, vous devriez appeler une API de résultats
-            won = prediction.odds < 1.5  # Simulation
+            won = prediction.odds < 1.5
             prediction.result = 'win' if won else 'lose'
             all_won = all_won and won
 
@@ -292,22 +301,31 @@ class BettingBot:
 
 @app.route('/')
 def home():
-    return "Bot is alive!"
+    now = datetime.now(Config.TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    return f"Bot is alive! Last check: {now}"
 
 def run_bot():
     bot = BettingBot()
-    logger.info("Bot démarré et en attente des événements!")
+    logger.info("Bot démarré!")
+    
+    # Envoi du message de démarrage
+    bot.notifier.send_startup_message()
+    time.sleep(2)  # Petit délai pour l'affichage
+    
+    # Génération immédiate du premier combo
+    logger.info("Génération du premier combo...")
+    bot.generate_combo()
 
     while True:
         try:
             now = datetime.now(bot.config.TIMEZONE)
             
-            # Génération du combo à 8h
+            # Génération quotidienne à 8h
             if now.hour == 8 and now.minute == 0:
                 bot.generate_combo()
-                time.sleep(60)  # Évite les doublons
+                time.sleep(60)
                 
-            # Vérification des résultats toutes les 15 minutes
+            # Vérification des résultats
             if now.minute % 15 == 0:
                 bot.verify_results()
                 
