@@ -1,3 +1,4 @@
+from flask import Flask
 import os
 import requests
 import time
@@ -8,7 +9,6 @@ import pytz
 from telegram import Bot, ParseMode
 import logging
 import threading
-from flask import Flask
 
 app = Flask(__name__)
 
@@ -31,6 +31,8 @@ class Config:
     MAX_VICTORY_ODDS: float = 1.60
     MIN_DOUB_CHANCE_ODDS: float = 1.30
     MAX_DOUB_CHANCE_ODDS: float = 1.55
+    MIN_MATCHES: int = 2  # Minimum de matchs par combo
+    MAX_MATCHES: int = 4  # Maximum de matchs par combo
 
 @dataclass
 class Prediction:
@@ -88,13 +90,13 @@ class TelegramNotifier:
         self.config = config
         self.bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
 
-    def send_startup_message(self):
+    async def send_startup_message(self):
         try:
             message = (
                 "🚀 *BOT DÉMARRÉ* 🚀\n\n"
-                "Le bot est maintenant actif et va générer son premier combo..."
+                "Génération du premier combo en cours..."
             )
-            self.bot.send_message(
+            await self.bot.send_message(
                 chat_id=self.config.TELEGRAM_CHAT_ID,
                 text=message,
                 parse_mode=ParseMode.MARKDOWN
@@ -105,7 +107,7 @@ class TelegramNotifier:
     def send_combo_predictions(self, predictions: List[Prediction], total_odds: float, stats: Stats):
         try:
             message = (
-                f"🎯 *NOUVEAU COMBO DU JOUR* 🎯\n\n"
+                f"🎯 *COMBO VIP DU JOUR* 🎯\n\n"
                 f"📅 {datetime.now(self.config.TIMEZONE).strftime('%d/%m/%Y')}\n\n"
             )
 
@@ -128,7 +130,7 @@ class TelegramNotifier:
                 text=message,
                 parse_mode=ParseMode.MARKDOWN
             )
-            logger.info(f"Combo envoyé avec succès - Cote totale: {total_odds:.2f}")
+            logger.info(f"Combo envoyé avec succès - {len(predictions)} matchs - Cote: {total_odds:.2f}")
         except Exception as e:
             logger.error(f"Erreur envoi combo: {e}")
 
@@ -261,21 +263,25 @@ class BettingBot:
         predictions = []
         total_odds = 1.0
 
+        # Tri des matchs par meilleure valeur
+        valid_predictions = []
         for match in matches:
             prediction = self.evaluate_predictions(match)
             if prediction:
-                predictions.append(prediction)
-                total_odds *= prediction.odds
+                valid_predictions.append(prediction)
 
-            if len(predictions) >= 3:
-                break
-
-        if predictions:
+        # Sélection des meilleurs matchs (entre MIN_MATCHES et MAX_MATCHES)
+        valid_predictions.sort(key=lambda x: x.odds, reverse=True)
+        predictions = valid_predictions[:self.config.MAX_MATCHES]
+        
+        if len(predictions) >= self.config.MIN_MATCHES:
+            for pred in predictions:
+                total_odds *= pred.odds
             self.current_predictions = predictions
             self.notifier.send_combo_predictions(predictions, total_odds, self.stats)
             logger.info(f"Nouveau combo généré avec {len(predictions)} prédictions")
         else:
-            logger.warning("Aucune prédiction générée")
+            logger.warning(f"Pas assez de prédictions valides (minimum {self.config.MIN_MATCHES} requis)")
 
     def verify_results(self):
         if not self.current_predictions:
@@ -289,7 +295,7 @@ class BettingBot:
 
         all_won = True
         for prediction in self.current_predictions:
-            won = prediction.odds < 1.5
+            won = prediction.odds < 1.5  # Simulation
             prediction.result = 'win' if won else 'lose'
             all_won = all_won and won
 
@@ -306,11 +312,10 @@ def run_bot():
     bot = BettingBot()
     logger.info("Bot démarré!")
     
-    bot.notifier.send_startup_message()
-    time.sleep(2)
-    
+    # Génération immédiate au démarrage
     logger.info("Génération du premier combo...")
-    bot.generate_combo()
+    bot.generate_combo()  # Génération immédiate
+    time.sleep(5)  # Attente pour s'assurer de l'envoi
 
     while True:
         try:
@@ -329,9 +334,10 @@ def run_bot():
             time.sleep(60)
 
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
+    # Démarrage Flask dans un thread séparé
+    flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))))
+    flask_thread.daemon = True
+    flask_thread.start()
     
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Démarrage du bot
+    run_bot()
