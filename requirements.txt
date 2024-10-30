@@ -1,5 +1,5 @@
+flask
+gunicorn
 python-telegram-bot==13.7
 requests==2.28.2
 pytz==2021.3
-flask
-gunicorn
