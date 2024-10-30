@@ -1,4 +1,3 @@
-from flask import Flask
 import os
 import requests
 import time
@@ -9,6 +8,7 @@ import pytz
 from telegram import Bot, ParseMode
 import logging
 import threading
+from flask import Flask
 
 app = Flask(__name__)
 
@@ -51,7 +51,6 @@ class Stats:
     current_streak: int = 0
     best_streak: int = 0
     worst_streak: int = 0
-    total_profit: float = 0
 
     def update(self, won: bool, odds: float = 1.0):
         self.total_bets += 1
@@ -60,12 +59,10 @@ class Stats:
             self.total_odds_won += odds
             self.current_streak = max(1, self.current_streak + 1)
             self.best_streak = max(self.best_streak, self.current_streak)
-            self.total_profit += (odds - 1) * 100
         else:
             self.lost_bets += 1
             self.current_streak = min(-1, self.current_streak - 1)
             self.worst_streak = min(self.worst_streak, self.current_streak)
-            self.total_profit -= 100
 
     def format_stats(self) -> str:
         win_rate = (self.won_bets / self.total_bets * 100) if self.total_bets > 0 else 0
@@ -74,9 +71,17 @@ class Stats:
             f"Total paris: {self.total_bets}\n"
             f"Gagnés: {self.won_bets} | Perdus: {self.lost_bets}\n"
             f"Taux de réussite: {win_rate:.1f}%\n"
-            f"ROI: {self.total_profit:.1f}%\n"
             f"Série actuelle: {abs(self.current_streak)} {'✅' if self.current_streak > 0 else '❌'}"
         )
+
+CAPITAL_MANAGEMENT_MESSAGE = """
+➖➖➖➖➖➖➖➖➖➖➖➖
+💎 *CONSEIL PROFESSIONNEL* 💎
+_La gestion du capital est la clé du succès. 
+Une stake fixe de 1-3% de votre bankroll maximisera 
+vos chances de réussite sur le long terme._
+➖➖➖➖➖➖➖➖➖➖➖➖
+"""
 
 class TelegramNotifier:
     def __init__(self, config: Config):
@@ -101,8 +106,7 @@ class TelegramNotifier:
         try:
             message = (
                 f"🎯 *NOUVEAU COMBO DU JOUR* 🎯\n\n"
-                f"📅 {datetime.now(self.config.TIMEZONE).strftime('%d/%m/%Y')}\n"
-                f"⏰ {datetime.now(self.config.TIMEZONE).strftime('%H:%M')}\n\n"
+                f"📅 {datetime.now(self.config.TIMEZONE).strftime('%d/%m/%Y')}\n\n"
             )
 
             for i, pred in enumerate(predictions, 1):
@@ -112,15 +116,12 @@ class TelegramNotifier:
                     f"⚽ {pred.match}\n"
                     f"💫 *{pred.prediction}*\n"
                     f"📈 Cote: *{pred.odds:.2f}*\n"
-                    f"🕒 {pred.start_time.strftime('%H:%M')}\n"
                     f"➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
                 )
 
-            message += (
-                f"📈 *COTE TOTALE: {total_odds:.2f}*\n\n"
-                f"💰 Gain potentiel: *{(total_odds - 1) * 100:.1f}%*\n\n"
-                f"{stats.format_stats()}"
-            )
+            message += f"📈 *COTE TOTALE: {total_odds:.2f}*\n\n"
+            message += f"{stats.format_stats()}\n\n"
+            message += CAPITAL_MANAGEMENT_MESSAGE
 
             self.bot.send_message(
                 chat_id=self.config.TELEGRAM_CHAT_ID,
@@ -140,24 +141,21 @@ class TelegramNotifier:
             if won:
                 message = (
                     f"🏆 *COMBO GAGNANT !* 🏆\n\n"
-                    f"💰 Gains: +{(total_odds - 1) * 100:.1f}% du mise\n"
                     f"📈 Cote totale: {total_odds:.2f}\n\n"
                 )
             else:
-                message = (
-                    f"❌ *COMBO PERDANT* ❌\n\n"
-                    f"📉 Perte: -100% de la mise\n\n"
-                )
+                message = "❌ *COMBO PERDANT* ❌\n\n"
 
             message += "*Détails des matchs:*\n"
-            for i, pred in predictions:
+            for i, pred in enumerate(predictions, 1):
                 message += (
                     f"{i}. {pred.match}\n"
                     f"➤ {pred.prediction} @ {pred.odds:.2f}\n"
                     f"Résultat: {'✅' if pred.result == 'win' else '❌'}\n\n"
                 )
 
-            message += f"\n{stats.format_stats()}"
+            message += f"\n{stats.format_stats()}\n\n"
+            message += CAPITAL_MANAGEMENT_MESSAGE
 
             self.bot.send_message(
                 chat_id=self.config.TELEGRAM_CHAT_ID,
@@ -301,18 +299,16 @@ class BettingBot:
 
 @app.route('/')
 def home():
-    now = datetime.now(Config.TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
-    return f"Bot is alive! Last check: {now}"
+    now = datetime.now(Config.TIMEZONE).strftime("%d/%m/%Y")
+    return f"Bot is alive! Date: {now}"
 
 def run_bot():
     bot = BettingBot()
     logger.info("Bot démarré!")
     
-    # Envoi du message de démarrage
     bot.notifier.send_startup_message()
-    time.sleep(2)  # Petit délai pour l'affichage
+    time.sleep(2)
     
-    # Génération immédiate du premier combo
     logger.info("Génération du premier combo...")
     bot.generate_combo()
 
@@ -320,12 +316,10 @@ def run_bot():
         try:
             now = datetime.now(bot.config.TIMEZONE)
             
-            # Génération quotidienne à 8h
             if now.hour == 8 and now.minute == 0:
                 bot.generate_combo()
                 time.sleep(60)
                 
-            # Vérification des résultats
             if now.minute % 15 == 0:
                 bot.verify_results()
                 
@@ -335,11 +329,9 @@ def run_bot():
             time.sleep(60)
 
 if __name__ == "__main__":
-    # Démarrer le bot dans un thread séparé
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
     
-    # Démarrer Flask
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
