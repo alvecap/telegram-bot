@@ -1,4 +1,3 @@
-kjhgfd
 from flask import Flask
 import os
 import requests
@@ -25,6 +24,7 @@ class Config:
     TELEGRAM_BOT_TOKEN: str = '7859048967:AAGtkGTwIUDN44PZB76EyvD1zogyJPCMOmw'
     TELEGRAM_CHAT_ID: str = '-1002421926748'
     BASE_URL: str = 'https://api.the-odds-api.com/v4/sports/soccer/odds'
+    SCORES_URL: str = 'https://api.the-odds-api.com/v4/sports/soccer/scores'
     REGIONS: str = 'eu'
     MARKETS: str = 'h2h,totals'
     ODDS_FORMAT: str = 'decimal'
@@ -32,8 +32,10 @@ class Config:
     MAX_VICTORY_ODDS: float = 1.60
     MIN_DOUB_CHANCE_ODDS: float = 1.30
     MAX_DOUB_CHANCE_ODDS: float = 1.55
-    MIN_MATCHES: int = 2  # Minimum de matchs par combo
-    MAX_MATCHES: int = 4  # Maximum de matchs par combo
+    MIN_MATCHES: int = 1
+    MAX_MATCHES: int = 3
+    MIN_TOTAL_ODDS: float = 1.50
+    MAX_TOTAL_ODDS: float = 3.00
 
 @dataclass
 class Prediction:
@@ -42,7 +44,7 @@ class Prediction:
     prediction: str
     odds: float
     start_time: datetime
-    bookmaker: str = "Moyenne"
+    bookmaker: str = "1XBET"
     result: Optional[str] = None
 
 @dataclass
@@ -118,7 +120,7 @@ class TelegramNotifier:
                     f"🏆 {pred.competition}\n"
                     f"⚽ {pred.match}\n"
                     f"💫 *{pred.prediction}*\n"
-                    f"📈 Cote: *{pred.odds:.2f}*\n"
+                    f"📈 Cote (1XBET): *{pred.odds:.2f}*\n"
                     f"➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
                 )
 
@@ -176,17 +178,19 @@ class BettingBot:
         self.stats = Stats()
         self.current_predictions: List[Prediction] = []
         self.last_check_time = datetime.now()
+        self.coupon_count = 0
 
-    def get_average_odds(self, bookmakers: List[Dict], outcome_name: str, market_key: str) -> Optional[float]:
+    def get_1xbet_odds(self, bookmakers: List[Dict], outcome_name: str, market_key: str) -> Optional[float]:
         odds = [
             outcome['price']
-            for bookmaker in bookmakers[:10]
+            for bookmaker in bookmakers
+            if bookmaker['title'].lower() == '1xbet'
             for market in bookmaker['markets']
             if market['key'] == market_key
             for outcome in market['outcomes']
             if outcome['name'] == outcome_name
         ]
-        return sum(odds) / len(odds) if odds else None
+        return odds[0] if odds else None
 
     def evaluate_predictions(self, match: Dict) -> Optional[Prediction]:
         try:
@@ -201,34 +205,13 @@ class BettingBot:
                 return None
 
             all_predictions = []
-
-            # Victoire Directe
-            home_odds = self.get_average_odds(match['bookmakers'], home_team, 'h2h')
-            away_odds = self.get_average_odds(match['bookmakers'], away_team, 'h2h')
+            home_odds = self.get_1xbet_odds(match['bookmakers'], home_team, 'h2h')
+            away_odds = self.get_1xbet_odds(match['bookmakers'], away_team, 'h2h')
 
             if home_odds and home_odds <= self.config.MAX_VICTORY_ODDS:
                 all_predictions.append(("Victoire", home_team, home_odds))
             if away_odds and away_odds <= self.config.MAX_VICTORY_ODDS:
                 all_predictions.append(("Victoire", away_team, away_odds))
-
-            # Double Chance
-            if home_odds and away_odds:
-                dc_1X = 1 / ((1 / home_odds) + (1 / (2 * away_odds)))
-                dc_X2 = 1 / ((1 / away_odds) + (1 / (2 * home_odds)))
-
-                if self.config.MIN_DOUB_CHANCE_ODDS <= dc_1X <= self.config.MAX_DOUB_CHANCE_ODDS:
-                    all_predictions.append(("Double chance 1X", home_team, dc_1X))
-                if self.config.MIN_DOUB_CHANCE_ODDS <= dc_X2 <= self.config.MAX_DOUB_CHANCE_ODDS:
-                    all_predictions.append(("Double chance X2", away_team, dc_X2))
-
-            # Over/Under
-            for ou_type, (min_odds, max_odds) in {
-                "Over 2.5": (1.30, 1.85),
-                "Under 2.5": (1.30, 1.70)
-            }.items():
-                ou_odds = self.get_average_odds(match['bookmakers'], ou_type, 'totals')
-                if ou_odds and min_odds <= ou_odds <= max_odds:
-                    all_predictions.append((ou_type, "", ou_odds))
 
             if not all_predictions:
                 return None
@@ -259,30 +242,40 @@ class BettingBot:
             logger.error(f"Erreur récupération cotes: {e}")
             return []
 
+    def fetch_scores(self) -> List[Dict]:
+        try:
+            url = f"{self.config.SCORES_URL}?apiKey={self.config.ODDS_API_KEY}"
+            response = requests.get(url)
+            response.raise_for_status()
+            return response.json() if response.ok else []
+        except Exception as e:
+            logger.error(f"Erreur récupération scores: {e}")
+            return []
+
     def generate_combo(self):
         matches = self.fetch_odds()
         predictions = []
         total_odds = 1.0
 
-        # Tri des matchs par meilleure valeur
         valid_predictions = []
         for match in matches:
             prediction = self.evaluate_predictions(match)
             if prediction:
                 valid_predictions.append(prediction)
 
-        # Sélection des meilleurs matchs (entre MIN_MATCHES et MAX_MATCHES)
         valid_predictions.sort(key=lambda x: x.odds, reverse=True)
         predictions = valid_predictions[:self.config.MAX_MATCHES]
-        
-        if len(predictions) >= self.config.MIN_MATCHES:
-            for pred in predictions:
-                total_odds *= pred.odds
+
+        for pred in predictions:
+            total_odds *= pred.odds
+
+        if len(predictions) >= self.config.MIN_MATCHES and self.config.MIN_TOTAL_ODDS <= total_odds <= self.config.MAX_TOTAL_ODDS:
             self.current_predictions = predictions
+            self.coupon_count += 1
             self.notifier.send_combo_predictions(predictions, total_odds, self.stats)
-            logger.info(f"Nouveau combo généré avec {len(predictions)} prédictions")
+            logger.info(f"Nouveau combo généré avec {len(predictions)} matchs")
         else:
-            logger.warning(f"Pas assez de prédictions valides (minimum {self.config.MIN_MATCHES} requis)")
+            logger.warning("Pas assez de prédictions valides ou cotes hors limites")
 
     def verify_results(self):
         if not self.current_predictions:
@@ -295,10 +288,18 @@ class BettingBot:
             return
 
         all_won = True
+        scores = self.fetch_scores()
         for prediction in self.current_predictions:
-            won = prediction.odds < 1.5  # Simulation
-            prediction.result = 'win' if won else 'lose'
-            all_won = all_won and won
+            score = next((s for s in scores if s['home_team'] in prediction.match and s['away_team'] in prediction.match), None)
+            if score and score['completed']:
+                home_goals = score['home_score']
+                away_goals = score['away_score']
+                if prediction.prediction.startswith("Victoire"):
+                    won = (home_goals > away_goals if prediction.prediction == "Victoire " + prediction.match.split(" vs ")[0] else away_goals > home_goals)
+                else:
+                    won = False
+                prediction.result = 'win' if won else 'lose'
+                all_won = all_won and won
 
         self.stats.update(all_won, sum(p.odds for p in self.current_predictions))
         self.notifier.send_result_notification(self.current_predictions, all_won, self.stats)
@@ -313,10 +314,8 @@ def run_bot():
     bot = BettingBot()
     logger.info("Bot démarré!")
     
-    # Génération immédiate au démarrage
-    logger.info("Génération du premier combo...")
-    bot.generate_combo()  # Génération immédiate
-    time.sleep(5)  # Attente pour s'assurer de l'envoi
+    bot.generate_combo()
+    time.sleep(5)
 
     while True:
         try:
@@ -335,10 +334,8 @@ def run_bot():
             time.sleep(60)
 
 if __name__ == "__main__":
-    # Démarrage Flask dans un thread séparé
-    flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))))
+    flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000))
     flask_thread.daemon = True
     flask_thread.start()
     
-    # Démarrage du bot
     run_bot()
